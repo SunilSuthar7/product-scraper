@@ -574,8 +574,8 @@ def extract_table_rows_from_page(page) -> List[Dict[str, Any]]:
 
 
 def collect_all_products(page) -> List[Dict[str, Any]]:
-    """Collect all products from infinite scroll table."""
-    log("Starting infinite scroll product collection...", "SCRAPER")
+    """Collect all products from infinite scroll table with optimized scrolling."""
+    log("Starting optimized infinite scroll collection...", "SCRAPER")
     all_rows: List[Dict[str, Any]] = []
     seen = set()
     
@@ -594,90 +594,134 @@ def collect_all_products(page) -> List[Dict[str, Any]]:
         infinite_container = page.wait_for_selector(".infinite-table", timeout=5000)
         log("Found infinite scroll container", "SCRAPER")
     except PlaywrightTimeoutError:
-        log("No infinite scroll container found, using default scrolling", "SCRAPER")
+        log("No infinite scroll container found, using page scrolling", "SCRAPER")
         infinite_container = None
     
-    # Scroll until no more products are loaded
+    # Optimized scrolling parameters
     scroll_attempts = 0
-    max_scroll_attempts = 200  # Increased for large dataset
+    max_scroll_attempts = 500  # High limit for safety
     no_new_data_count = 0
     max_no_new_data = 5
     
-    last_row_count = len(all_rows)
+    last_count = len(all_rows)
+    last_log_time = time.time()
     
     while scroll_attempts < max_scroll_attempts and no_new_data_count < max_no_new_data:
         try:
-            # Scroll within the infinite container if found, otherwise scroll the page
+            # FAST SCROLLING: Minimal wait time
             if infinite_container:
-                # Scroll to bottom of the infinite container
-                infinite_container.evaluate("element => element.scrollTop = element.scrollHeight")
+                infinite_container.evaluate("""
+                    element => {
+                        element.scrollTop = element.scrollHeight;
+                        // Small additional scroll to trigger loading
+                        setTimeout(() => element.scrollBy(0, 10), 10);
+                    }
+                """)
             else:
-                # Scroll the entire page
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.evaluate("""
+                    window.scrollTo(0, document.body.scrollHeight);
+                    setTimeout(() => window.scrollBy(0, 10), 10);
+                """)
             
-            # Wait for new content to load (shorter wait since we're scrolling faster)
-            time.sleep(0.8)
+            # VERY SHORT WAIT - most modern infinite scroll loads quickly
+            time.sleep(0.3)
             
-            # Extract new rows
-            new_rows = extract_table_rows_from_page(page)
-            added_count = 0
-            
-            for row in new_rows:
-                row_hash = str(sorted(row.items()))
-                if row_hash not in seen:
-                    seen.add(row_hash)
-                    all_rows.append(row)
-                    added_count += 1
-            
-            # Check progress
-            if added_count > 0:
-                no_new_data_count = 0
-                if len(all_rows) % 100 == 0:  # Log every 100 rows
-                    log(f"Total rows: {len(all_rows)}, New: {added_count}", "SCRAPER")
-            else:
-                no_new_data_count += 1
-                log(f"No new data ({no_new_data_count}/{max_no_new_data})", "SCRAPER")
+            # Extract new rows but only check every few scrolls to save time
+            if scroll_attempts % 3 == 0:  # Check every 3rd scroll
+                new_rows = extract_table_rows_from_page(page)
+                added_count = 0
                 
-                # Try alternative scrolling methods if no new data
-                if no_new_data_count == 1:
-                    # Scroll a bit more aggressively
-                    if infinite_container:
-                        infinite_container.evaluate("element => element.scrollBy(0, 500)")
-                    else:
-                        page.evaluate("window.scrollBy(0, 500)")
-                    time.sleep(0.5)
-                elif no_new_data_count == 2:
-                    # Try scrolling to specific elements
-                    try:
-                        last_row = page.query_selector("table tbody tr:last-child")
-                        if last_row:
-                            last_row.scroll_into_view_if_needed()
-                            time.sleep(0.5)
-                    except:
-                        pass
+                for row in new_rows:
+                    row_hash = str(sorted(row.items()))
+                    if row_hash not in seen:
+                        seen.add(row_hash)
+                        all_rows.append(row)
+                        added_count += 1
+                
+                # Progress logging
+                current_time = time.time()
+                if added_count > 0 or current_time - last_log_time > 8:
+                    log(f"Rows: {len(all_rows)}, New: {added_count}, Attempt: {scroll_attempts}", "SCRAPER")
+                    last_log_time = current_time
+                
+                # Check if we got new data
+                if added_count > 0:
+                    no_new_data_count = 0
+                    last_count = len(all_rows)
+                else:
+                    no_new_data_count += 1
             
             scroll_attempts += 1
             
-            # Check if we've loaded all products
-            remaining_text = page.query_selector(".infinite-table ~ div span, .infinite-table + div span")
-            if remaining_text:
-                remaining = remaining_text.inner_text()
-                log(f"Remaining products text: {remaining}", "SCRAPER")
-                if "0 remaining" in remaining:
-                    log("All products loaded!", "SCRAPER")
-                    break
+            # Dynamic completion detection - check for "0 remaining" or no change
+            if scroll_attempts % 15 == 0:  # Check every 15 scrolls
+                try:
+                    # Look for the "remaining products" text
+                    remaining_text_elements = page.query_selector_all("div.text-center span, div.text-muted-foreground")
+                    for element in remaining_text_elements:
+                        text = element.inner_text().lower()
+                        if "0 remaining" in text or "all products loaded" in text:
+                            log("Completion detected: " + text, "SCRAPER")
+                            no_new_data_count = max_no_new_data
+                            break
+                    
+                    # Also check if scroll height isn't increasing (end of content)
+                    if infinite_container:
+                        current_scroll_height = infinite_container.evaluate("element => element.scrollHeight")
+                        scroll_position = infinite_container.evaluate("element => element.scrollTop")
+                        if scroll_position > 0 and current_scroll_height - scroll_position < 100:
+                            log("Reached end of scroll container", "SCRAPER")
+                            no_new_data_count += 1
+                    
+                except Exception as e:
+                    log(f"Completion check error: {e}", "SCRAPER")
             
-            # Safety check: if we haven't gotten new data in a while, break
-            if len(all_rows) == last_row_count:
-                no_new_data_count += 1
-            else:
-                last_row_count = len(all_rows)
-                no_new_data_count = 0
+            # Additional check: if we've scrolled a lot with no new data, likely done
+            if no_new_data_count >= 2 and scroll_attempts > 50:
+                log("Multiple scrolls with no new data, likely completed", "SCRAPER")
+                break
                 
         except Exception as e:
-            log(f"Error during scrolling: {e}", "SCRAPER")
+            log(f"Scroll error: {e}", "SCRAPER")
             scroll_attempts += 1
-            time.sleep(0.5)
+            time.sleep(0.1)
+    
+    # Final comprehensive check
+    try:
+        log("Performing final comprehensive check...", "SCRAPER")
+        # Scroll to very end one more time
+        if infinite_container:
+            infinite_container.evaluate("element => element.scrollTop = element.scrollHeight")
+        else:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        
+        time.sleep(1)
+        
+        # Extract any remaining rows
+        new_rows = extract_table_rows_from_page(page)
+        final_added = 0
+        for row in new_rows:
+            row_hash = str(sorted(row.items()))
+            if row_hash not in seen:
+                seen.add(row_hash)
+                all_rows.append(row)
+                final_added += 1
+        
+        if final_added > 0:
+            log(f"Final check found {final_added} additional rows", "SCRAPER")
+        
+        # One last check for completion message
+        try:
+            completion_elements = page.query_selector_all("text/0 remaining, text/all products, text/loaded")
+            for element in completion_elements:
+                text = element.inner_text().lower()
+                if "0" in text and "remaining" in text:
+                    log("Confirmed: 0 products remaining", "SCRAPER")
+        except:
+            pass
+            
+    except Exception as e:
+        log(f"Final check error: {e}", "SCRAPER")
     
     log(f"Collection complete. Total unique rows: {len(all_rows)}", "SCRAPER")
     return all_rows
