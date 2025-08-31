@@ -2,10 +2,6 @@
 """
 Iden Challenge — Playwright scraper with fixed navigation
 
-Fixes:
-- Proper menu handling based on the actual UI structure
-- Better element selection for the specific layout
-- Enhanced error handling and debugging
 """
 
 import argparse
