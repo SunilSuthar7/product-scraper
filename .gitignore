@@ -1,0 +1,15 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore environment & sensitive files
+.env
+.env.local
+
+# Ignore Playwright browser storage (optional)
+storage/
+
+# Ignore virtual environments
+venv/
+
+*.json
